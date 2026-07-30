@@ -637,8 +637,8 @@ func TestSearchStatusConditionsNotOperator(t *testing.T) {
 	account := h.NewRandAccount()
 	ctx := h.NewAuthenticatedContext(account)
 
-	// "not" wrapping a condition query
-	searchStr := "not status.conditions.Reconciled='True'"
+	// NOT wrapping a condition query is now supported (scalar subquery composes with NOT)
+	searchStr := "not (status.conditions.Reconciled='True')"
 	search := openapi.SearchParams(searchStr)
 	params := &openapi.GetClustersParams{
 		Search: &search,
@@ -646,9 +646,9 @@ func TestSearchStatusConditionsNotOperator(t *testing.T) {
 	resp, err := client.GetClustersWithResponse(ctx, params, test.WithAuthToken(ctx))
 
 	Expect(err).NotTo(HaveOccurred())
-	Expect(resp.StatusCode()).To(Equal(http.StatusBadRequest))
+	Expect(resp.StatusCode()).To(Equal(http.StatusOK))
 
-	// "not" wrapping subtree containing a condition
+	// NOT wrapping subtree containing a condition + label is also supported
 	searchMixed := "not (labels.region='us-east' AND status.conditions.Reconciled='True')"
 	searchMixedParam := openapi.SearchParams(searchMixed)
 	mixedParams := &openapi.GetClustersParams{
@@ -657,9 +657,9 @@ func TestSearchStatusConditionsNotOperator(t *testing.T) {
 	mixedResp, err := client.GetClustersWithResponse(ctx, mixedParams, test.WithAuthToken(ctx))
 
 	Expect(err).NotTo(HaveOccurred())
-	Expect(mixedResp.StatusCode()).To(Equal(http.StatusBadRequest))
+	Expect(mixedResp.StatusCode()).To(Equal(http.StatusOK))
 
-	// "not" wrapping a non-condition, non-label field is allowed
+	// NOT wrapping a non-condition, non-label field is still allowed
 	searchAllowed := "status.conditions.Reconciled='True' AND not (name='nonexistent')"
 	searchAllowedParam := openapi.SearchParams(searchAllowed)
 	allowedParams := &openapi.GetClustersParams{

@@ -26,8 +26,6 @@ func TestSQLTranslation(t *testing.T) {
 	genericService := sqlGenericService{genericDao: g}
 
 	// ill-formatted search should be rejected
-	// Note: v6 accepts bare identifiers like "garbage" as valid expressions,
-	// so we use a truly unparseable input instead.
 	errorTests := []map[string]interface{}{
 		{
 			"search": "= = =",
@@ -49,88 +47,48 @@ func TestSQLTranslation(t *testing.T) {
 		Expect(serviceErr.Error()).To(Equal(errorMsg))
 	}
 
-	// tests for sql parsing
+	// tests for sql parsing — now uses WalkToSQL directly
+	// Note: WalkToSQL always prefixes bare columns with "resources."
 	sqlTests := []map[string]interface{}{
 		{
 			"search": "created_by in ['ooo.openshift']",
-			"sql":    "created_by IN (?)",
+			"sql":    "resources.created_by IN (?)",
 			"values": ConsistOf("ooo.openshift"),
 		},
-		// Test spec.xxx field mapping (shallow, string value — no CAST)
 		{
 			"search": "spec.region = 'us-east-1'",
 			"sql":    "spec->>'region' = ?",
 			"values": ConsistOf("us-east-1"),
 		},
-		// Test spec.xxx.yyy field mapping (2-level nested, string value — no CAST)
 		{
 			"search": "spec.release.version = '2'",
 			"sql":    "spec->'release'->>'version' = ?",
 			"values": ConsistOf("2"),
 		},
-		// Test spec.xxx.yyy.zzz field mapping (3-level nested, string value — no CAST)
 		{
 			"search": "spec.release.notes.url = 'https://example.com'",
 			"sql":    "spec->'release'->'notes'->>'url' = ?",
 			"values": ConsistOf("https://example.com"),
 		},
-		// Test spec field with unquoted number — CAST applied for correct numeric ordering
 		{
 			"search": "spec.replicas > 9",
 			"sql":    "CAST(spec->>'replicas' AS numeric) > ?",
 			"values": ConsistOf(float64(9)),
 		},
-		// Test nested spec field with unquoted number — CAST applied
 		{
 			"search": "spec.release.version > 9",
 			"sql":    "CAST(spec->'release'->>'version' AS numeric) > ?",
 			"values": ConsistOf(float64(9)),
 		},
-		// Test 3-level nested spec field with unquoted number — CAST applied
 		{
 			"search": "spec.release.config.replicas > 9",
 			"sql":    "CAST(spec->'release'->'config'->>'replicas' AS numeric) > ?",
 			"values": ConsistOf(float64(9)),
 		},
-		// Test ID query (should be allowed)
 		{
 			"search": "id = 'cls-123'",
-			"sql":    "id = ?",
+			"sql":    "resources.id = ?",
 			"values": ConsistOf("cls-123"),
-		},
-	}
-	for _, test := range sqlTests {
-		var list []api.Resource
-		search := test["search"].(string)
-		sqlReal := test["sql"].(string)
-		valuesReal := test["values"].(types.GomegaMatcher)
-		listCtx, _, serviceErr := genericService.newListContext(
-			context.Background(), &ListArguments{Search: search}, &list,
-		)
-		Expect(serviceErr).ToNot(HaveOccurred())
-		// v6 handles deep identifiers natively — no preprocessing needed
-		tslTreeWrapper, err := tsl.ParseTSL(search)
-		Expect(err).ToNot(HaveOccurred())
-		tslTree := tslTreeWrapper.Node
-		// Apply field name mapping (includes numeric CAST for spec fields)
-		tslTree, serviceErr = db.FieldNameWalk(tslTree)
-		Expect(serviceErr).ToNot(HaveOccurred())
-		sqlizer, serviceErr := genericService.treeWalkForSqlizer(listCtx, &tsl.TSLNode{Node: tslTree})
-		Expect(serviceErr).ToNot(HaveOccurred())
-		sql, values, err := sqlizer.ToSql()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(sql).To(Equal(sqlReal))
-		Expect(values).To(valuesReal)
-	}
-
-	// Verify JSONB-mapped fields survive treeWalkForRelatedTables without
-	// being misclassified as related-resource paths (the "->" substring
-	// signals an already-mapped JSONB expression that should be skipped).
-	jsonbRelatedTableTests := []map[string]interface{}{
-		{
-			"search": "spec.release.version = '2'",
-			"sql":    "spec->'release'->>'version' = ?",
-			"values": ConsistOf("2"),
 		},
 		{
 			"search": "properties.owner = 'team_a'",
@@ -138,30 +96,23 @@ func TestSQLTranslation(t *testing.T) {
 			"values": ConsistOf("team_a"),
 		},
 	}
-	for _, test := range jsonbRelatedTableTests {
-		var list []api.Resource
+	for _, test := range sqlTests {
 		search := test["search"].(string)
 		sqlReal := test["sql"].(string)
 		valuesReal := test["values"].(types.GomegaMatcher)
-		listCtx, _, serviceErr := genericService.newListContext(
-			context.Background(), &ListArguments{Search: search}, &list,
-		)
-		Expect(serviceErr).ToNot(HaveOccurred())
-		tslTreeWrapper, err := tsl.ParseTSL(search)
-		Expect(err).ToNot(HaveOccurred())
-		tslTree := tslTreeWrapper.Node
-		tslTree, serviceErr = db.FieldNameWalk(tslTree)
-		Expect(serviceErr).ToNot(HaveOccurred())
-		d := g.GetInstanceDao(context.Background(), &api.Resource{})
-		tslTree, serviceErr = genericService.treeWalkForRelatedTables(listCtx, tslTree, &d)
-		Expect(serviceErr).ToNot(HaveOccurred(), "JSONB field should not be misclassified as related table: %s", search)
-		tslTree, serviceErr = genericService.treeWalkForAddingTableName(listCtx, tslTree, &d)
-		Expect(serviceErr).ToNot(HaveOccurred())
-		sqlizer, serviceErr := genericService.treeWalkForSqlizer(listCtx, &tsl.TSLNode{Node: tslTree})
-		Expect(serviceErr).ToNot(HaveOccurred())
-		sql, values, err := sqlizer.ToSql()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(sql).To(Equal(sqlReal))
-		Expect(values).To(valuesReal)
+
+		sql, values, serviceErr := db.WalkToSQL(mustParseTSL(t, search))
+		Expect(serviceErr).ToNot(HaveOccurred(), "WalkToSQL failed for: %s", search)
+		Expect(sql).To(Equal(sqlReal), "SQL mismatch for: %s", search)
+		Expect(values).To(valuesReal, "values mismatch for: %s", search)
 	}
+}
+
+func mustParseTSL(t *testing.T, search string) *tsl.TSLNode {
+	t.Helper()
+	node, err := tsl.ParseTSL(search)
+	if err != nil {
+		t.Fatalf("ParseTSL(%q) failed: %v", search, err)
+	}
+	return node
 }
